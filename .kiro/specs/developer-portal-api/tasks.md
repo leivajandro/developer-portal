@@ -2,13 +2,13 @@
 
 ## Resumen
 
-Este plan implementa un sistema serverless event-driven que genera automáticamente un Developer Portal centralizado a partir de especificaciones OpenAPI publicadas por pipelines de CI/CD. El sistema utiliza AWS Lambda (Node.js/TypeScript), S3, SQS y Redoc para procesar y publicar documentación de forma incremental.
+Este plan implementa un sistema serverless event-driven que genera automáticamente un Developer Portal centralizado a partir de especificaciones OpenAPI publicadas por pipelines de GitLab CI. El sistema utiliza AWS Lambda (Node.js/TypeScript), S3 privado con CloudFront + WAF, y Redoc para procesar y publicar documentación de forma incremental y segura.
 
 ## Tareas
 
 - [ ] 1. Configurar estructura del proyecto y dependencias
-  - Crear estructura de directorios para Lambda, CLI, frontend y tests
-  - Configurar package.json con dependencias: @aws-sdk/client-s3, @aws-sdk/client-sqs, @redocly/openapi-core, @apidevtools/swagger-parser, typescript, vitest, fast-check
+  - Crear estructura de directorios para Lambda, frontend y tests
+  - Configurar package.json con dependencias: @aws-sdk/client-s3, @redocly/openapi-core, @apidevtools/swagger-parser, typescript, vitest, fast-check
   - Configurar tsconfig.json para Node.js 18+ con strict mode
   - Configurar scripts de build y test en package.json
   - _Requisitos: 1.1, 1.2, 1.3, 1.4, 1.5_
@@ -115,7 +115,7 @@ Este plan implementa un sistema serverless event-driven que genera automáticame
     - **Valida: Requisitos 1.4, 3.2, 3.3**
   
   - [ ] 7.3 Implementar función handler principal
-    - Procesar eventos SQS en batch
+    - Procesar eventos S3 directamente (sin SQS)
     - Iterar sobre cada record y llamar a processRecord
     - Recolectar resultados de procesamiento
     - Actualizar services.json con resultados exitosos
@@ -123,7 +123,7 @@ Este plan implementa un sistema serverless event-driven que genera automáticame
     - _Requisitos: 1.1, 1.4, 3.1, 3.2_
   
   - [ ] 7.4 Implementar función processRecord
-    - Parsear evento S3 desde mensaje SQS
+    - Parsear evento S3 directamente
     - Extraer serviceName y version del path S3
     - Descargar especificación desde S3
     - Validar especificación con OpenAPIValidator
@@ -136,7 +136,8 @@ Este plan implementa un sistema serverless event-driven que genera automáticame
     - Manejar errores de validación (rechazar y loggear)
     - Manejar errores de S3 (reintentar si es recuperable)
     - Manejar timeouts y errores de Redoc
-    - Lanzar excepciones para que SQS reintente
+    - Lanzar excepciones para que Lambda reintente automáticamente
+    - Configurar Dead Letter Queue para eventos fallidos
     - _Requisitos: 1.3_
   
   - [ ]* 7.6 Escribir tests unitarios para Lambda handler
@@ -186,67 +187,79 @@ Este plan implementa un sistema serverless event-driven que genera automáticame
   - Verificar que el frontend carga correctamente
   - Preguntar al usuario si hay ajustes necesarios
 
-- [ ] 10. Implementar infraestructura AWS con CDK o Terraform
-  - [ ] 10.1 Crear stack de infraestructura
-    - Definir bucket S3 para specs con versionado habilitado
-    - Definir bucket S3 para portal con static website hosting
-    - Configurar S3 Event Notifications hacia SQS
-    - Crear cola SQS con Dead Letter Queue
-    - Crear función Lambda con runtime Node.js 18
-    - Configurar trigger SQS para Lambda
-    - Definir roles IAM con permisos mínimos necesarios
+- [ ] 10. Implementar infraestructura AWS con Terraform HCL
+  - [ ] 10.1 Crear archivos Terraform para infraestructura
+    - Crear providers.tf con configuración de AWS provider y backend S3
+    - Crear variables.tf con variables de entrada (region, project_name, bucket names, custom_domain)
+    - Crear s3.tf para buckets privados (specs y portal) con versionado y block public access
+    - Crear lambda.tf para función Lambda con trigger S3 directo y Dead Letter Queue
+    - Crear iam.tf para roles y políticas IAM con permisos mínimos
+    - Crear cloudfront.tf para CloudFront distribution con Origin Access Identity (OAI)
+    - Crear waf.tf para AWS WAF Web ACL con reglas de protección
+    - Crear acm.tf para certificado ACM en us-east-1 (opcional)
+    - Crear route53.tf para registro DNS A (opcional)
+    - Crear outputs.tf con outputs de CloudFront URL, bucket names, Lambda ARN
     - _Requisitos: 1.1, 3.1, 3.3, 3.4_
   
-  - [ ] 10.2 Configurar variables de entorno para Lambda
+  - [ ] 10.2 Configurar S3 Event Notification para trigger directo a Lambda
+    - Configurar S3 Event Notification en specs bucket para eventos s3:ObjectCreated:*
+    - Configurar Lambda permission para permitir invocación desde S3
+    - Eliminar configuración de SQS (no se usa)
+    - _Requisitos: 1.1, 3.1_
+  
+  - [ ] 10.3 Configurar buckets S3 privados con CloudFront OAI
+    - Configurar block public access en ambos buckets
+    - Crear Origin Access Identity para CloudFront
+    - Configurar bucket policy en portal bucket para permitir acceso solo desde OAI
+    - _Requisitos: 3.3, 3.4_
+  
+  - [ ] 10.4 Configurar CloudFront distribution
+    - Configurar origin apuntando a portal bucket con OAI
+    - Configurar default cache behavior con redirect-to-https
+    - Configurar compresión y TTL para caché
+    - Asociar WAF Web ACL a la distribución
+    - Configurar certificado ACM y dominio personalizado (opcional)
+    - _Requisitos: 3.3, 3.4_
+  
+  - [ ] 10.5 Configurar AWS WAF Web ACL
+    - Crear Web ACL con scope CLOUDFRONT
+    - Agregar regla de rate limiting (2000 requests por IP)
+    - Agregar AWS Managed Rules: CommonRuleSet, KnownBadInputsRuleSet, AmazonIpReputationList
+    - Configurar logging a S3 bucket
+    - Configurar métricas de CloudWatch
+    - _Requisitos: 3.4_
+  
+  - [ ] 10.6 Configurar variables de entorno para Lambda
     - SPECS_BUCKET: nombre del bucket de especificaciones
     - PORTAL_BUCKET: nombre del bucket del portal
     - REDOC_OPTIONS: opciones de tema en JSON
     - _Requisitos: 1.1, 4.1_
   
-  - [ ] 10.3 Configurar CloudWatch Logs y Metrics
+  - [ ] 10.7 Configurar CloudWatch Logs y Metrics
     - Crear log group para Lambda
     - Definir métricas personalizadas (SpecsProcessed, ProcessingErrors, etc.)
     - Crear alarmas para error rate y DLQ messages
+    - Crear alarmas para WAF (HighBlockedRequests)
     - _Requisitos: 1.3_
 
-- [ ] 11. Implementar CLI tool (opcional)
-  - [ ] 11.1 Crear estructura del CLI con commander
-    - Implementar comando publish para subir specs a S3
-    - Implementar comando validate para validar specs localmente
-    - Implementar comando list para listar specs publicadas
-    - Agregar opciones: --service-name, --version, --environment, --bucket
-    - _Requisitos: 1.1, 1.2, 3.2, 3.4_
-  
-  - [ ] 11.2 Implementar configuración del CLI
-    - Soportar archivo openapi-portal.config.yml
-    - Cargar configuración de AWS (region, buckets)
-    - Cargar configuración de validación
-    - _Requisitos: 1.1, 1.5, 3.4_
-  
-  - [ ]* 11.3 Escribir tests unitarios para comandos CLI
-    - Test para comando publish
-    - Test para comando validate
-    - Test para carga de configuración
-    - _Requisitos: 1.1, 1.2_
-
-- [ ] 12. Implementar tests de integración
-  - [ ]* 12.1 Escribir test de integración S3 -> SQS -> Lambda
+- [ ] 11. Implementar tests de integración
+  - [ ]* 11.1 Escribir test de integración S3 -> Lambda
     - Subir spec a S3, esperar procesamiento, verificar HTML generado
     - Verificar actualización de services.json
     - _Requisitos: 1.1, 1.4, 2.1, 3.1, 3.2, 3.3_
   
-  - [ ]* 12.2 Escribir test de concurrencia para actualización de catálogo
+  - [ ]* 11.2 Escribir test de concurrencia para actualización de catálogo
     - Simular múltiples Lambdas actualizando simultáneamente
     - Verificar que no hay pérdida de datos
     - _Requisitos: 2.1, 3.3_
   
-  - [ ]* 12.3 Escribir tests de carga
+  - [ ]* 11.3 Escribir tests de carga
     - Test para procesar 100 specs concurrentemente
-    - Test para manejar 1000 mensajes en cola SQS
+    - Test para manejar múltiples eventos S3 simultáneos
     - _Requisitos: 1.1, 3.1_
 
-- [ ] 13. Implementar tests E2E con Playwright
-  - [ ]* 13.1 Escribir test E2E para navegación del portal
+- [ ] 12. Implementar tests E2E con Playwright
+  - [ ]* 12.1 Escribir test E2E para navegación del portal
     - Test para visualizar catálogo de servicios
     - Test para navegar a página de documentación Redoc
     - Test para búsqueda y filtrado de servicios
@@ -254,40 +267,51 @@ Este plan implementa un sistema serverless event-driven que genera automáticame
     - **Valida: Propiedades 7, 8, 9, 10**
     - _Requisitos: 2.1, 2.2, 2.3, 2.4, 2.5_
   
-  - [ ]* 13.2 Escribir test E2E para renderizado de Redoc
+  - [ ]* 12.2 Escribir test E2E para renderizado de Redoc
     - Test para visualizar información completa de endpoints
     - Test para copiar ejemplos al portapapeles
     - Test para expandir/colapsar schemas anidados
     - **Valida: Propiedades 11, 12, 14, 17**
     - _Requisitos: 4.1, 4.2, 4.3, 4.4, 4.5, 6.1, 6.2, 6.4, 6.5_
   
-  - [ ]* 13.3 Escribir test E2E para diseño responsive
+  - [ ]* 12.3 Escribir test E2E para diseño responsive
     - Test para layout en viewport móvil (375px)
     - Test para adaptación de grid en diferentes tamaños
     - **Valida: Propiedad 21**
     - _Requisitos: 8.1, 8.2_
 
-- [ ] 14. Configurar pipeline de CI/CD
-  - [ ] 14.1 Crear workflow de GitHub Actions o GitLab CI
+- [ ] 13. Configurar pipeline de GitLab CI
+  - [ ] 13.1 Crear workflow de GitLab CI para el proyecto
+    - Configurar stages: validate, plan, apply
     - Configurar job para ejecutar tests unitarios
     - Configurar job para ejecutar tests de propiedades
     - Configurar job para ejecutar tests de integración
     - Configurar job para generar reporte de cobertura
     - Configurar job para build de función Lambda
-    - Configurar job para deploy de infraestructura
+    - Configurar job para Terraform validate, plan y apply
+    - Configurar secrets para credenciales AWS
     - _Requisitos: 1.1, 1.2, 1.3, 1.4_
   
-  - [ ] 14.2 Configurar deploy automático del portal
-    - Deploy de index.html y assets a S3
-    - Deploy de función Lambda
-    - Configurar secrets para credenciales AWS
+  - [ ] 13.2 Crear pipeline de GitLab CI para microservicios
+    - Crear ejemplo de .gitlab-ci.yml para publicar especificaciones
+    - Configurar job para subir openapi.json a S3 specs bucket
+    - Incluir metadatos (commit SHA, pipeline ID, timestamp)
+    - Configurar para ejecutar en branches main y tags
+    - _Requisitos: 1.1, 3.2_
+  
+  - [ ] 13.3 Configurar deploy automático del portal
+    - Deploy de index.html y assets a S3 portal bucket
+    - Deploy de función Lambda con código actualizado
+    - Invalidar caché de CloudFront después de deploy
     - _Requisitos: 5.1, 5.2_
 
-- [ ] 15. Checkpoint final - Validación completa del sistema
+- [ ] 14. Checkpoint final - Validación completa del sistema
   - Ejecutar todos los tests (unitarios, propiedades, integración, E2E)
   - Verificar cobertura de código (objetivo: 80%+)
-  - Desplegar infraestructura en ambiente de prueba
-  - Publicar especificación de prueba y verificar generación del portal
+  - Desplegar infraestructura en ambiente de prueba con Terraform
+  - Publicar especificación de prueba vía GitLab CI y verificar generación del portal
+  - Verificar acceso al portal vía CloudFront con HTTPS
+  - Verificar que WAF está bloqueando solicitudes maliciosas
   - Validar que todas las propiedades de correctitud se cumplen
   - Preguntar al usuario si el sistema cumple con las expectativas
 
@@ -300,4 +324,9 @@ Este plan implementa un sistema serverless event-driven que genera automáticame
 - Los tests unitarios validan ejemplos específicos y casos edge
 - La implementación usa TypeScript para type safety
 - El sistema es completamente serverless y event-driven
+- Lambda se activa directamente desde eventos S3 (sin SQS)
+- Buckets S3 son privados con acceso controlado mediante CloudFront OAI
+- CloudFront + WAF proporcionan distribución segura con protección contra ataques
+- Terraform HCL se usa para infraestructura como código
+- GitLab CI se usa para pipelines de publicación y deployment
 - Redoc maneja el renderizado de documentación, eliminando la necesidad de templates personalizados

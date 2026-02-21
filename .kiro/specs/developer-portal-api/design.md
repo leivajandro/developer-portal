@@ -1,27 +1,32 @@
-# Documento de Diseño: Developer Portal API
+b# Documento de Diseño: Developer Portal API
 
 ## Resumen General
 
-El Developer Portal API es un sistema event-driven que genera automáticamente un Developer Portal centralizado mediante la agregación de especificaciones OpenAPI de múltiples microservicios. El sistema utiliza una arquitectura serverless basada en AWS Lambda, S3 y SQS para procesar y publicar documentación de forma incremental.
+El Developer Portal API es un sistema event-driven que genera automáticamente un Developer Portal centralizado mediante la agregación de especificaciones OpenAPI de múltiples microservicios. El sistema utiliza una arquitectura serverless basada en AWS Lambda y S3 para procesar y publicar documentación de forma incremental, con CloudFront y WAF obligatorios para distribución segura.
 
 ### Arquitectura Final
 
 El sistema consta de los siguientes componentes principales:
 
-1. **Pipeline de Publicación**: Los pipelines de CI/CD publican especificaciones OpenAPI a un bucket S3
-2. **Event-Driven Processing**: S3 Event Notifications envían mensajes a una cola SQS cuando se publican nuevas especificaciones
-3. **Lambda Processor (Node.js)**: Función Lambda que consume mensajes SQS, valida especificaciones, genera HTML usando Redoc, y actualiza el portal
-4. **Portal Estático en S3**: Bucket S3 que aloja el sitio web estático con páginas de documentación generadas y un índice de servicios
-5. **Herramienta CLI (Opcional)**: CLI para publicación manual y validación de especificaciones
+1. **Pipeline de Publicación (GitLab CI)**: Los pipelines de GitLab CI publican especificaciones OpenAPI a un bucket S3 privado
+2. **Event-Driven Processing**: S3 Event Notifications activan directamente una función Lambda cuando se publican nuevas especificaciones
+3. **Lambda Processor (Node.js)**: Función Lambda que procesa eventos S3, valida especificaciones, genera HTML usando Redoc, y actualiza el portal
+4. **Portal Estático en S3**: Bucket S3 privado que aloja el sitio web estático con páginas de documentación generadas y un índice de servicios
+5. **CloudFront Distribution**: Distribución CloudFront con Origin Access Identity (OAI) para acceso seguro a buckets S3 privados
+6. **AWS WAF**: Web Application Firewall con reglas de protección, rate limiting y geo-blocking
+7. **Dominio Personalizado**: Route 53 y ACM para certificado SSL/TLS en dominio personalizado (opcional)
 
 ### Decisiones Clave de Diseño
 
 - **Lambda + Node.js**: Elegido porque Redoc (@redocly/openapi-core) es nativo de Node.js, proporcionando la mejor integración
 - **Redoc para renderizado**: Utiliza la biblioteca @redocly/openapi-core para generar HTML standalone de alta calidad, eliminando la necesidad de templates personalizados
-- **Event-driven con SQS**: Procesamiento asíncrono y desacoplado que escala automáticamente con el volumen de publicaciones
+- **Event-driven con S3 triggers directos**: Lambda se activa directamente desde eventos S3 (sin SQS), simplificando la arquitectura y reduciendo latencia
 - **Regeneración incremental**: Solo regenera las especificaciones que cambian, no reconstruye todo el sitio
-- **S3 para almacenamiento**: Almacenamiento duradero y escalable para especificaciones y HTML generado
+- **S3 privado con CloudFront**: Buckets S3 privados con acceso controlado mediante Origin Access Identity (OAI)
+- **CloudFront + WAF obligatorio**: Distribución segura con protección contra ataques DDoS, rate limiting, AWS Managed Rules y geo-blocking
 - **Index page estático con datos dinámicos**: HTML estático que carga services.json dinámicamente para el catálogo
+- **Terraform HCL para infraestructura**: Infraestructura como código usando Terraform HCL nativo
+- **GitLab CI para publicación**: Pipeline de GitLab CI para publicar especificaciones y desplegar infraestructura
 - **Enfoque en OpenAPI 3.x**: Soporte para especificaciones OpenAPI 3.0 y 3.1 usando bibliotecas de validación estándar
 
 
@@ -31,38 +36,42 @@ El sistema consta de los siguientes componentes principales:
 
 ```mermaid
 graph TB
-    subgraph "Pipeline CI/CD"
+    subgraph "GitLab CI Pipeline"
         A[Build de Microservicio]
         B[Especificación OpenAPI]
     end
     
-    subgraph "S3 Specs Bucket"
+    subgraph "S3 Specs Bucket privado"
         C[user-service/v1.0.0/openapi.json]
         D[order-service/v2.0.0/openapi.json]
-    end
-    
-    subgraph "Event Processing"
         E[S3 Event Notification]
-        F[SQS Queue]
     end
     
     subgraph "Lambda Function Node.js"
-        G[SQS Consumer]
-        H[OpenAPI Validator]
-        I[Redoc Generator]
-        J[Catalog Updater]
+        F[S3 Event Handler]
+        G[OpenAPI Validator]
+        H[Redoc Generator]
+        I[Catalog Updater]
     end
     
-    subgraph "S3 Portal Bucket"
-        K[index.html]
-        L[services.json]
-        M[services/user-service-v1.0.0.html]
-        N[services/order-service-v2.0.0.html]
-        O[assets/]
+    subgraph "S3 Portal Bucket privado"
+        J[index.html]
+        K[services.json]
+        L[services/user-service-v1.0.0.html]
+        M[services/order-service-v2.0.0.html]
+        N[assets/]
+    end
+    
+    subgraph "CloudFront + WAF"
+        O[AWS WAF Web ACL]
+        P[CloudFront Distribution]
+        Q[Origin Access Identity]
+        R[ACM Certificate]
+        S[Route 53 opcional]
     end
     
     subgraph "Usuarios"
-        P[Desarrolladores]
+        T[Desarrolladores]
     end
     
     A --> B
@@ -73,29 +82,33 @@ graph TB
     E --> F
     F --> G
     G --> H
-    H --> I
-    I --> M
-    I --> N
-    J --> L
-    K --> P
-    L --> P
-    M --> P
-    N --> P
+    H --> L
+    H --> M
+    I --> K
+    J --> Q
+    K --> Q
+    L --> Q
+    M --> Q
+    N --> Q
+    Q --> P
     O --> P
+    R --> P
+    S --> P
+    P --> T
 ```
 
 ### Flujo de Datos
 
-1. **Publicación**: Los pipelines de CI/CD publican especificaciones OpenAPI a S3 specs bucket (path: `{service-name}/{version}/openapi.json`)
+1. **Publicación**: Los pipelines de GitLab CI publican especificaciones OpenAPI a S3 specs bucket privado (path: `{service-name}/{version}/openapi.json`)
 2. **Event Notification**: S3 emite un evento cuando se crea/actualiza un objeto
-3. **Queue**: El evento se envía a una cola SQS para procesamiento asíncrono
-4. **Lambda Trigger**: Lambda se activa automáticamente al recibir mensajes en la cola
-5. **Descarga**: Lambda descarga la especificación OpenAPI desde S3
-6. **Validación**: Lambda valida el formato y conformidad con OpenAPI 3.0/3.1
-7. **Generación con Redoc**: Lambda usa @redocly/openapi-core para generar HTML standalone
-8. **Upload HTML**: Lambda sube el HTML generado al portal bucket (path: `services/{service-name}-{version}.html`)
-9. **Actualización de Catálogo**: Lambda actualiza el archivo `services.json` con los metadatos del nuevo servicio
-10. **Acceso**: Los usuarios acceden al portal vía S3 Static Website Hosting o CloudFront
+3. **Lambda Trigger**: Lambda se activa automáticamente al recibir el evento S3 directamente (sin SQS)
+4. **Descarga**: Lambda descarga la especificación OpenAPI desde S3
+5. **Validación**: Lambda valida el formato y conformidad con OpenAPI 3.0/3.1
+6. **Generación con Redoc**: Lambda usa @redocly/openapi-core para generar HTML standalone
+7. **Upload HTML**: Lambda sube el HTML generado al portal bucket privado (path: `services/{service-name}-{version}.html`)
+8. **Actualización de Catálogo**: Lambda actualiza el archivo `services.json` con los metadatos del nuevo servicio
+9. **Acceso Seguro**: Los usuarios acceden al portal vía CloudFront (https://portal.example.com) con protección WAF
+10. **CloudFront**: CloudFront usa OAI para acceder a los buckets S3 privados y sirve el contenido con certificado SSL/TLS
 
 ### Estructura de S3
 
@@ -125,50 +138,7 @@ portal-bucket/
 
 ## Componentes e Interfaces
 
-### 1. Herramienta CLI (Opcional)
-
-La CLI proporciona comandos para publicar especificaciones manualmente y validar antes de publicar.
-
-#### Interfaz de Comandos
-
-```bash
-# Publicar una especificación OpenAPI a S3
-openapi-portal publish <spec-file> \
-  --service-name <name> \
-  --version <version> \
-  --environment <env> \
-  --commit <hash> \
-  --bucket <s3-bucket>
-
-# Validar una especificación sin publicar
-openapi-portal validate <spec-file>
-
-# Listar especificaciones publicadas
-openapi-portal list \
-  --bucket <s3-bucket> \
-  --service <name>
-```
-
-#### Opciones de Configuración
-
-```yaml
-# openapi-portal.config.yml
-aws:
-  region: us-east-1
-  specsBucket: my-openapi-specs
-  portalBucket: my-developer-portal
-  
-validation:
-  strict: true
-  allowedVersions: ["3.0", "3.1"]
-  
-environments:
-  - development
-  - staging
-  - production
-```
-
-### 2. Validador de OpenAPI
+### 1. Validador de OpenAPI
 
 El validador asegura que las especificaciones cumplan con el estándar OpenAPI antes de procesarlas.
 
@@ -234,11 +204,11 @@ class OpenAPIValidatorImpl implements OpenAPIValidator {
 ```
 
 
-### 3. Buckets S3
+### 2. Buckets S3
 
-#### Specs Bucket
+#### Specs Bucket (Privado)
 
-Almacena las especificaciones OpenAPI publicadas por los pipelines.
+Almacena las especificaciones OpenAPI publicadas por los pipelines de GitLab CI.
 
 **Estructura de Paths:**
 - Pattern: `{service-name}/{version}/openapi.json`
@@ -248,74 +218,42 @@ Almacena las especificaciones OpenAPI publicadas por los pipelines.
 ```json
 {
   "versioning": "Enabled",
+  "publicAccess": "BlockAll",
   "eventNotifications": [
     {
       "events": ["s3:ObjectCreated:*"],
-      "destination": "sqs-queue-arn"
+      "destination": "lambda-function-arn"
     }
   ]
 }
 ```
 
-#### Portal Bucket
+#### Portal Bucket (Privado)
 
 Almacena el sitio web estático generado con las páginas de documentación.
 
 **Configuración:**
 ```json
 {
+  "publicAccess": "BlockAll",
   "staticWebsiteHosting": {
     "enabled": true,
     "indexDocument": "index.html",
     "errorDocument": "error.html"
   },
-  "publicAccess": true
-}
-```
-
-### 4. Cola SQS
-
-Recibe eventos de S3 y activa el procesamiento Lambda.
-
-#### Configuración de la Cola
-
-```json
-{
-  "queueName": "openapi-specs-queue",
-  "visibilityTimeout": 300,
-  "messageRetentionPeriod": 86400,
-  "receiveMessageWaitTime": 20,
-  "deadLetterQueue": {
-    "targetArn": "dlq-arn",
-    "maxReceiveCount": 3
+  "corsConfiguration": {
+    "allowedOrigins": ["https://portal.example.com"],
+    "allowedMethods": ["GET", "HEAD"],
+    "allowedHeaders": ["*"]
   }
 }
 ```
 
-#### Formato de Mensaje
+**Acceso:**
+- Solo accesible mediante CloudFront con Origin Access Identity (OAI)
+- No hay acceso público directo al bucket S3
 
-```json
-{
-  "Records": [
-    {
-      "eventName": "ObjectCreated:Put",
-      "s3": {
-        "bucket": {
-          "name": "my-openapi-specs"
-        },
-        "object": {
-          "key": "user-service/v1.0.0/openapi.json",
-          "size": 12345,
-          "eTag": "abc123"
-        }
-      }
-    }
-  ]
-}
-```
-
-
-### 5. Función Lambda (Node.js)
+### 3. Función Lambda (Node.js)
 
 La función Lambda es el componente central que procesa especificaciones OpenAPI y genera el portal.
 
@@ -334,9 +272,9 @@ La función Lambda es el componente central que procesa especificaciones OpenAPI
   },
   "triggers": [
     {
-      "type": "SQS",
-      "queueArn": "sqs-queue-arn",
-      "batchSize": 10
+      "type": "S3",
+      "bucketArn": "arn:aws:s3:::my-openapi-specs",
+      "events": ["s3:ObjectCreated:*"]
     }
   ]
 }
@@ -345,12 +283,12 @@ La función Lambda es el componente central que procesa especificaciones OpenAPI
 #### Interfaz del Handler
 
 ```typescript
-import { SQSEvent, SQSRecord, Context } from 'aws-lambda';
+import { S3Event, S3EventRecord, Context } from 'aws-lambda';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { bundle } from '@redocly/openapi-core';
 
 interface LambdaHandler {
-  handler(event: SQSEvent, context: Context): Promise<void>;
+  handler(event: S3Event, context: Context): Promise<void>;
 }
 
 interface ProcessingResult {
@@ -365,7 +303,7 @@ interface ProcessingResult {
 #### Implementación del Handler
 
 ```typescript
-export async function handler(event: SQSEvent, context: Context): Promise<void> {
+export async function handler(event: S3Event, context: Context): Promise<void> {
   const results: ProcessingResult[] = [];
   
   for (const record of event.Records) {
@@ -380,6 +318,8 @@ export async function handler(event: SQSEvent, context: Context): Promise<void> 
         success: false,
         error: error.message
       });
+      // Re-throw para que Lambda reintente
+      throw error;
     }
   }
   
@@ -389,11 +329,10 @@ export async function handler(event: SQSEvent, context: Context): Promise<void> 
   console.log('Processing complete:', JSON.stringify(results));
 }
 
-async function processRecord(record: SQSRecord): Promise<ProcessingResult> {
-  // 1. Parsear el evento S3
-  const s3Event = JSON.parse(record.body);
-  const bucket = s3Event.Records[0].s3.bucket.name;
-  const key = s3Event.Records[0].s3.object.key;
+async function processRecord(record: S3EventRecord): Promise<ProcessingResult> {
+  // 1. Extraer información del evento S3
+  const bucket = record.s3.bucket.name;
+  const key = record.s3.object.key;
   
   // 2. Extraer service name y version del path
   const [serviceName, version] = key.split('/');
@@ -424,7 +363,7 @@ async function processRecord(record: SQSRecord): Promise<ProcessingResult> {
 ```
 
 
-### 6. Integración con Redoc
+### 4. Integración con Redoc
 
 Utiliza la biblioteca @redocly/openapi-core para generar páginas de documentación HTML standalone.
 
@@ -556,7 +495,7 @@ function createHTML(params: {
 - **Soporte completo de OpenAPI 3.x**: Maneja todas las características de OpenAPI 3.0 y 3.1
 
 
-### 7. Generador de Catálogo
+### 5. Generador de Catálogo
 
 Actualiza el archivo `services.json` y mantiene la página `index.html` del catálogo de servicios.
 
@@ -874,6 +813,264 @@ function updateLastUpdate(services) {
 ```
 
 
+### 6. CloudFront Distribution
+
+CloudFront proporciona distribución global del portal con baja latencia y acceso seguro a los buckets S3 privados.
+
+#### Configuración de CloudFront
+
+```typescript
+interface CloudFrontConfig {
+  originAccessIdentity: string; // OAI para acceder a S3 privado
+  origins: Origin[];
+  defaultCacheBehavior: CacheBehavior;
+  customDomain?: string;
+  certificateArn?: string; // ACM certificate
+  webAclArn: string; // AWS WAF Web ACL
+}
+
+interface Origin {
+  id: string;
+  domainName: string; // S3 bucket domain
+  s3OriginConfig: {
+    originAccessIdentity: string;
+  };
+}
+
+interface CacheBehavior {
+  targetOriginId: string;
+  viewerProtocolPolicy: 'redirect-to-https' | 'https-only';
+  allowedMethods: string[];
+  cachedMethods: string[];
+  compress: boolean;
+  defaultTTL: number;
+  maxTTL: number;
+  minTTL: number;
+}
+```
+
+#### Origin Access Identity (OAI)
+
+```json
+{
+  "comment": "OAI for Developer Portal",
+  "callerReference": "developer-portal-oai"
+}
+```
+
+**Política de Bucket S3:**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowCloudFrontOAI",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity XXXXX"
+      },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::my-developer-portal/*"
+    }
+  ]
+}
+```
+
+#### Configuración de Caché
+
+```json
+{
+  "defaultCacheBehavior": {
+    "viewerProtocolPolicy": "redirect-to-https",
+    "allowedMethods": ["GET", "HEAD", "OPTIONS"],
+    "cachedMethods": ["GET", "HEAD"],
+    "compress": true,
+    "defaultTTL": 86400,
+    "maxTTL": 31536000,
+    "minTTL": 0,
+    "forwardedValues": {
+      "queryString": false,
+      "cookies": {
+        "forward": "none"
+      }
+    }
+  }
+}
+```
+
+#### Dominio Personalizado (Opcional)
+
+**Route 53:**
+```json
+{
+  "name": "portal.example.com",
+  "type": "A",
+  "aliasTarget": {
+    "hostedZoneId": "Z2FDTNDATAQYW2",
+    "dnsName": "d123456789.cloudfront.net",
+    "evaluateTargetHealth": false
+  }
+}
+```
+
+**ACM Certificate:**
+- Debe estar en región us-east-1 para CloudFront
+- Validación mediante DNS (Route 53)
+- Incluir dominio principal y wildcard (*.example.com)
+
+
+### 7. AWS WAF (Web Application Firewall)
+
+AWS WAF protege el portal contra ataques comunes y proporciona control de acceso granular.
+
+#### Configuración de WAF Web ACL
+
+```typescript
+interface WAFWebACL {
+  name: string;
+  scope: 'CLOUDFRONT' | 'REGIONAL';
+  defaultAction: 'ALLOW' | 'BLOCK';
+  rules: WAFRule[];
+  visibilityConfig: VisibilityConfig;
+}
+
+interface WAFRule {
+  name: string;
+  priority: number;
+  statement: RuleStatement;
+  action: 'ALLOW' | 'BLOCK' | 'COUNT';
+  visibilityConfig: VisibilityConfig;
+}
+
+interface VisibilityConfig {
+  sampledRequestsEnabled: boolean;
+  cloudWatchMetricsEnabled: boolean;
+  metricName: string;
+}
+```
+
+#### Reglas de WAF Recomendadas
+
+**1. Rate Limiting:**
+```json
+{
+  "name": "RateLimitRule",
+  "priority": 1,
+  "statement": {
+    "rateBasedStatement": {
+      "limit": 2000,
+      "aggregateKeyType": "IP"
+    }
+  },
+  "action": {
+    "block": {}
+  }
+}
+```
+
+**2. AWS Managed Rules:**
+```json
+{
+  "name": "AWSManagedRulesCommonRuleSet",
+  "priority": 2,
+  "statement": {
+    "managedRuleGroupStatement": {
+      "vendorName": "AWS",
+      "name": "AWSManagedRulesCommonRuleSet"
+    }
+  },
+  "overrideAction": {
+    "none": {}
+  }
+}
+```
+
+**3. AWS Managed Rules - Known Bad Inputs:**
+```json
+{
+  "name": "AWSManagedRulesKnownBadInputsRuleSet",
+  "priority": 3,
+  "statement": {
+    "managedRuleGroupStatement": {
+      "vendorName": "AWS",
+      "name": "AWSManagedRulesKnownBadInputsRuleSet"
+    }
+  },
+  "overrideAction": {
+    "none": {}
+  }
+}
+```
+
+**4. Geo-Blocking (Opcional):**
+```json
+{
+  "name": "GeoBlockingRule",
+  "priority": 4,
+  "statement": {
+    "geoMatchStatement": {
+      "countryCodes": ["CN", "RU", "KP"]
+    }
+  },
+  "action": {
+    "block": {}
+  }
+}
+```
+
+**5. IP Reputation List:**
+```json
+{
+  "name": "AWSManagedRulesAmazonIpReputationList",
+  "priority": 5,
+  "statement": {
+    "managedRuleGroupStatement": {
+      "vendorName": "AWS",
+      "name": "AWSManagedRulesAmazonIpReputationList"
+    }
+  },
+  "overrideAction": {
+    "none": {}
+  }
+}
+```
+
+#### Logging y Monitoreo
+
+```json
+{
+  "loggingConfiguration": {
+    "resourceArn": "arn:aws:wafv2:us-east-1:123456789012:global/webacl/developer-portal/xxxxx",
+    "logDestinationConfigs": [
+      "arn:aws:s3:::aws-waf-logs-developer-portal"
+    ],
+    "redactedFields": []
+  }
+}
+```
+
+#### Métricas de CloudWatch
+
+- `AllowedRequests` - Solicitudes permitidas
+- `BlockedRequests` - Solicitudes bloqueadas
+- `CountedRequests` - Solicitudes contadas (modo COUNT)
+- `RateLimitedRequests` - Solicitudes limitadas por rate limiting
+
+#### Alarmas Recomendadas
+
+```json
+{
+  "alarmName": "HighBlockedRequests",
+  "metricName": "BlockedRequests",
+  "threshold": 1000,
+  "evaluationPeriods": 2,
+  "period": 300,
+  "statistic": "Sum",
+  "comparisonOperator": "GreaterThanThreshold"
+}
+```
+
+
 ## Modelos de Datos
 
 ### Especificación OpenAPI (Entrada)
@@ -1132,15 +1329,17 @@ interface VersionEntry {
 
 ### Runtime y Lenguaje
 
-- **Node.js 18+**: Runtime para Lambda y CLI
+- **Node.js 18+**: Runtime para Lambda
 - **TypeScript**: Lenguaje principal para type safety y mejor experiencia de desarrollo
 
 ### AWS Services
 
 - **AWS Lambda**: Procesamiento serverless de especificaciones OpenAPI
-- **Amazon S3**: Almacenamiento de especificaciones y hosting del sitio estático
-- **Amazon SQS**: Cola de mensajes para procesamiento asíncrono
-- **CloudFront (Opcional)**: CDN para distribución global del portal
+- **Amazon S3**: Almacenamiento de especificaciones (privado) y hosting del sitio estático (privado)
+- **Amazon CloudFront**: CDN para distribución global del portal con HTTPS
+- **AWS WAF**: Web Application Firewall para protección contra ataques
+- **AWS Certificate Manager (ACM)**: Certificados SSL/TLS para dominio personalizado (opcional)
+- **Amazon Route 53**: DNS para dominio personalizado (opcional)
 - **AWS SDK v3**: Cliente para interactuar con servicios AWS
 
 ### Bibliotecas Core
@@ -1153,18 +1352,11 @@ interface VersionEntry {
 - `@redocly/openapi-core` - Biblioteca core de Redoc para bundling y procesamiento de specs
 - Redoc CDN - Para renderizado en el navegador (incluido en HTML generado)
 
-#### CLI Framework (Opcional)
-- `commander` - Framework para CLI con parsing de argumentos
-- `chalk` - Colores en terminal para mejor UX
-- `ora` - Spinners de progreso para operaciones largas
-
 #### AWS SDK
 - `@aws-sdk/client-s3` - Cliente S3 para upload/download
-- `@aws-sdk/client-sqs` - Cliente SQS para procesamiento de mensajes
 - `@aws-sdk/client-lambda` - Cliente Lambda para invocaciones
 
 #### Utilidades
-- `fs-extra` - Operaciones de sistema de archivos mejoradas (para CLI)
 - `js-yaml` - Parsing de YAML para configuración
 
 ### Frontend (Sitio Estático)
@@ -1194,19 +1386,545 @@ interface VersionEntry {
 
 ### Infraestructura como Código
 
-- **AWS CDK** o **Terraform** para provisionar:
-  - Buckets S3 con configuración de eventos
-  - Cola SQS con DLQ
-  - Función Lambda con permisos IAM
-  - CloudFront distribution (opcional)
+- **Terraform HCL** para provisionar:
+  - Buckets S3 privados con configuración de eventos
+  - Función Lambda con permisos IAM y trigger S3
+  - CloudFront distribution con OAI
+  - AWS WAF Web ACL con reglas de protección
+  - ACM certificate (opcional)
+  - Route 53 records (opcional)
 
 ### CI/CD
 
-- **GitHub Actions** o **GitLab CI** para:
+- **GitLab CI** para:
   - Ejecutar tests
   - Build de la función Lambda
-  - Deploy de infraestructura
+  - Deploy de infraestructura con Terraform
+  - Publicar especificaciones OpenAPI a S3
   - Deploy inicial de index.html y assets
+
+
+## Infraestructura con Terraform
+
+La infraestructura se define usando Terraform HCL nativo para provisionar todos los recursos AWS necesarios.
+
+### Estructura de Archivos Terraform
+
+```
+terraform/
+├── main.tf              # Recursos principales
+├── variables.tf         # Variables de entrada
+├── outputs.tf           # Outputs de la infraestructura
+├── providers.tf         # Configuración de providers
+├── s3.tf               # Buckets S3
+├── lambda.tf           # Función Lambda
+├── cloudfront.tf       # CloudFront distribution
+├── waf.tf              # AWS WAF Web ACL
+├── iam.tf              # Roles y políticas IAM
+├── acm.tf              # Certificado ACM (opcional)
+├── route53.tf          # DNS Route 53 (opcional)
+└── terraform.tfvars    # Valores de variables
+```
+
+### Ejemplo de Configuración Terraform
+
+#### providers.tf
+
+```hcl
+terraform {
+  required_version = ">= 1.0"
+  
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+  
+  backend "s3" {
+    bucket = "my-terraform-state"
+    key    = "developer-portal/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+provider "aws" {
+  alias  = "us_east_1"
+  region = "us-east-1"  # Para ACM certificate (CloudFront requiere us-east-1)
+}
+```
+
+#### variables.tf
+
+```hcl
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "project_name" {
+  description = "Project name"
+  type        = string
+  default     = "developer-portal"
+}
+
+variable "specs_bucket_name" {
+  description = "S3 bucket name for OpenAPI specs"
+  type        = string
+}
+
+variable "portal_bucket_name" {
+  description = "S3 bucket name for portal static site"
+  type        = string
+}
+
+variable "custom_domain" {
+  description = "Custom domain for CloudFront (optional)"
+  type        = string
+  default     = ""
+}
+```
+
+#### s3.tf (Buckets Privados)
+
+```hcl
+# Bucket para especificaciones OpenAPI (privado)
+resource "aws_s3_bucket" "specs" {
+  bucket = var.specs_bucket_name
+}
+
+resource "aws_s3_bucket_versioning" "specs" {
+  bucket = aws_s3_bucket.specs.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "specs" {
+  bucket                  = aws_s3_bucket.specs.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# Notificación S3 -> Lambda (directo, sin SQS)
+resource "aws_s3_bucket_notification" "specs" {
+  bucket = aws_s3_bucket.specs.id
+  
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.processor.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+  
+  depends_on = [aws_lambda_permission.allow_s3]
+}
+
+# Bucket para portal estático (privado)
+resource "aws_s3_bucket" "portal" {
+  bucket = var.portal_bucket_name
+}
+
+resource "aws_s3_bucket_public_access_block" "portal" {
+  bucket                  = aws_s3_bucket.portal.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# Política de bucket para CloudFront OAI
+resource "aws_s3_bucket_policy" "portal" {
+  bucket = aws_s3_bucket.portal.id
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowCloudFrontOAI"
+        Effect = "Allow"
+        Principal = {
+          AWS = aws_cloudfront_origin_access_identity.portal.iam_arn
+        }
+        Action   = "s3:GetObject"
+        Resource = "${aws_s3_bucket.portal.arn}/*"
+      }
+    ]
+  })
+}
+```
+
+#### lambda.tf (Trigger S3 Directo)
+
+```hcl
+# Función Lambda
+resource "aws_lambda_function" "processor" {
+  filename         = "lambda.zip"
+  function_name    = "${var.project_name}-processor"
+  role            = aws_iam_role.lambda.arn
+  handler         = "index.handler"
+  source_code_hash = filebase64sha256("lambda.zip")
+  runtime         = "nodejs18.x"
+  timeout         = 300
+  memory_size     = 1024
+  
+  environment {
+    variables = {
+      SPECS_BUCKET  = aws_s3_bucket.specs.id
+      PORTAL_BUCKET = aws_s3_bucket.portal.id
+    }
+  }
+}
+
+# Permiso para que S3 invoque Lambda directamente
+resource "aws_lambda_permission" "allow_s3" {
+  statement_id  = "AllowExecutionFromS3"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.processor.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.specs.arn
+}
+
+# Rol IAM para Lambda
+resource "aws_iam_role" "lambda" {
+  name = "${var.project_name}-lambda-role"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+    }]
+  })
+}
+
+# Política para acceso a S3
+resource "aws_iam_role_policy" "lambda_s3" {
+  name = "${var.project_name}-lambda-s3-policy"
+  role = aws_iam_role.lambda.id
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:GetObjectVersion"]
+        Resource = "${aws_s3_bucket.specs.arn}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:GetObject"]
+        Resource = "${aws_s3_bucket.portal.arn}/*"
+      }
+    ]
+  })
+}
+
+# Política para CloudWatch Logs
+resource "aws_iam_role_policy_attachment" "lambda_logs" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+```
+
+#### cloudfront.tf (Con OAI)
+
+```hcl
+# Origin Access Identity para acceso a S3 privado
+resource "aws_cloudfront_origin_access_identity" "portal" {
+  comment = "OAI for ${var.project_name}"
+}
+
+# CloudFront Distribution
+resource "aws_cloudfront_distribution" "portal" {
+  enabled             = true
+  is_ipv6_enabled     = true
+  default_root_object = "index.html"
+  web_acl_id          = aws_wafv2_web_acl.portal.arn
+  
+  aliases = var.custom_domain != "" ? [var.custom_domain] : []
+  
+  origin {
+    domain_name = aws_s3_bucket.portal.bucket_regional_domain_name
+    origin_id   = "S3-${aws_s3_bucket.portal.id}"
+    
+    s3_origin_config {
+      origin_access_identity = aws_cloudfront_origin_access_identity.portal.cloudfront_access_identity_path
+    }
+  }
+  
+  default_cache_behavior {
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "S3-${aws_s3_bucket.portal.id}"
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+    
+    forwarded_values {
+      query_string = false
+      cookies {
+        forward = "none"
+      }
+    }
+    
+    min_ttl     = 0
+    default_ttl = 86400
+    max_ttl     = 31536000
+  }
+  
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+  
+  viewer_certificate {
+    cloudfront_default_certificate = var.custom_domain == ""
+    acm_certificate_arn           = var.custom_domain != "" ? aws_acm_certificate.portal[0].arn : null
+    ssl_support_method            = var.custom_domain != "" ? "sni-only" : null
+    minimum_protocol_version      = "TLSv1.2_2021"
+  }
+}
+```
+
+#### waf.tf (Reglas de Protección)
+
+```hcl
+# WAF Web ACL
+resource "aws_wafv2_web_acl" "portal" {
+  name  = "${var.project_name}-web-acl"
+  scope = "CLOUDFRONT"
+  
+  default_action {
+    allow {}
+  }
+  
+  # Rate Limiting
+  rule {
+    name     = "RateLimitRule"
+    priority = 1
+    
+    action {
+      block {}
+    }
+    
+    statement {
+      rate_based_statement {
+        limit              = 2000
+        aggregate_key_type = "IP"
+      }
+    }
+    
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name               = "RateLimitRule"
+      sampled_requests_enabled  = true
+    }
+  }
+  
+  # AWS Managed Rules - Common Rule Set
+  rule {
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 2
+    
+    override_action {
+      none {}
+    }
+    
+    statement {
+      managed_rule_group_statement {
+        vendor_name = "AWS"
+        name        = "AWSManagedRulesCommonRuleSet"
+      }
+    }
+    
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name               = "AWSManagedRulesCommonRuleSet"
+      sampled_requests_enabled  = true
+    }
+  }
+  
+  # AWS Managed Rules - Known Bad Inputs
+  rule {
+    name     = "AWSManagedRulesKnownBadInputsRuleSet"
+    priority = 3
+    
+    override_action {
+      none {}
+    }
+    
+    statement {
+      managed_rule_group_statement {
+        vendor_name = "AWS"
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+      }
+    }
+    
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name               = "AWSManagedRulesKnownBadInputsRuleSet"
+      sampled_requests_enabled  = true
+    }
+  }
+  
+  # IP Reputation List
+  rule {
+    name     = "AWSManagedRulesAmazonIpReputationList"
+    priority = 4
+    
+    override_action {
+      none {}
+    }
+    
+    statement {
+      managed_rule_group_statement {
+        vendor_name = "AWS"
+        name        = "AWSManagedRulesAmazonIpReputationList"
+      }
+    }
+    
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name               = "AWSManagedRulesAmazonIpReputationList"
+      sampled_requests_enabled  = true
+    }
+  }
+  
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name               = "${var.project_name}-web-acl"
+    sampled_requests_enabled  = true
+  }
+}
+```
+
+#### acm.tf (Certificado SSL/TLS - Opcional)
+
+```hcl
+# Certificado ACM para dominio personalizado
+resource "aws_acm_certificate" "portal" {
+  count = var.custom_domain != "" ? 1 : 0
+  
+  provider          = aws.us_east_1  # CloudFront requiere us-east-1
+  domain_name       = var.custom_domain
+  validation_method = "DNS"
+  
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+```
+
+#### route53.tf (DNS - Opcional)
+
+```hcl
+# Registro A para dominio personalizado
+resource "aws_route53_record" "portal" {
+  count = var.custom_domain != "" ? 1 : 0
+  
+  zone_id = var.route53_zone_id
+  name    = var.custom_domain
+  type    = "A"
+  
+  alias {
+    name                   = aws_cloudfront_distribution.portal.domain_name
+    zone_id                = aws_cloudfront_distribution.portal.hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+```
+
+### GitLab CI Pipeline para Terraform
+
+```yaml
+# .gitlab-ci.yml
+stages:
+  - validate
+  - plan
+  - apply
+
+variables:
+  TF_ROOT: terraform
+  AWS_DEFAULT_REGION: us-east-1
+
+.terraform_base:
+  image: hashicorp/terraform:1.6
+  before_script:
+    - cd $TF_ROOT
+    - terraform init
+
+terraform:validate:
+  extends: .terraform_base
+  stage: validate
+  script:
+    - terraform validate
+    - terraform fmt -check
+
+terraform:plan:
+  extends: .terraform_base
+  stage: plan
+  script:
+    - terraform plan -out=tfplan
+  artifacts:
+    paths:
+      - $TF_ROOT/tfplan
+    expire_in: 1 week
+  only:
+    - merge_requests
+    - main
+
+terraform:apply:
+  extends: .terraform_base
+  stage: apply
+  script:
+    - terraform apply -auto-approve tfplan
+  dependencies:
+    - terraform:plan
+  only:
+    - main
+  when: manual
+  environment:
+    name: production
+```
+
+### GitLab CI Pipeline para Publicar Especificaciones
+
+```yaml
+# .gitlab-ci.yml (en repositorio de microservicio)
+stages:
+  - build
+  - publish
+
+variables:
+  AWS_DEFAULT_REGION: us-east-1
+  SPECS_BUCKET: my-openapi-specs
+  SERVICE_NAME: user-service
+  SERVICE_VERSION: v1.0.0
+
+publish:openapi:
+  stage: publish
+  image: amazon/aws-cli:latest
+  script:
+    - |
+      aws s3 cp openapi.json \
+        s3://${SPECS_BUCKET}/${SERVICE_NAME}/${SERVICE_VERSION}/openapi.json \
+        --metadata "commit=${CI_COMMIT_SHA},pipeline=${CI_PIPELINE_ID},timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  only:
+    - main
+    - tags
+  variables:
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+```
 
 
 ## Propiedades de Correctitud
@@ -1384,7 +2102,8 @@ interface ValidationError {
 
 **Comportamiento:**
 - Lambda registra el error en CloudWatch Logs
-- El mensaje SQS se mueve a la Dead Letter Queue después de 3 intentos
+- Lambda reintenta automáticamente (hasta 2 veces por defecto)
+- Después de reintentos fallidos, el evento va a Dead Letter Queue (DLQ)
 - Se envía notificación (SNS/email) sobre especificaciones rechazadas
 - No se modifica el estado del portal (no se genera HTML)
 - El pipeline de CI/CD puede consultar el estado vía API o logs
@@ -1458,46 +2177,73 @@ async function handleLambdaError(error: ProcessingError): Promise<void> {
     await sendAlert(error);
   }
   
-  // 4. Lanzar excepción para que SQS reintente
+  // 4. Lanzar excepción para que Lambda reintente
   throw error;
 }
 ```
 
 **Comportamiento:**
-- Lambda retorna error para que SQS reintente el mensaje
-- Después de 3 intentos fallidos, el mensaje va a DLQ
+- Lambda retorna error para activar reintentos automáticos
+- Después de reintentos fallidos, el evento va a DLQ
 - CloudWatch Alarms monitorean tasa de errores y activan notificaciones
 - Logs estructurados en JSON para facilitar debugging
 - Métricas personalizadas para monitorear salud del sistema
 
-### Errores de SQS
+### Errores de Procesamiento Lambda con Reintentos
 
 **Escenarios de Error:**
-- Mensaje malformado (JSON inválido)
-- Mensaje duplicado (mismo spec publicado múltiples veces)
-- Cola llena (throttling)
+- Evento S3 malformado
+- Especificación duplicada (mismo spec publicado múltiples veces)
 - Timeout al procesar mensaje
 
 **Manejo:**
 ```typescript
-interface SQSMessageHandler {
-  async processMessage(record: SQSRecord): Promise<void>;
-  async handleDLQMessage(record: SQSRecord): Promise<void>;
+export async function handler(event: S3Event, context: Context): Promise<void> {
+  for (const record of event.Records) {
+    try {
+      // Validar formato del evento
+      if (!record.s3 || !record.s3.object || !record.s3.object.key) {
+        throw new Error('Invalid S3 event format');
+      }
+      
+      const result = await processRecord(record);
+      console.log('Processing successful:', result);
+    } catch (error) {
+      console.error('Error processing record:', error);
+      // Re-throw para que Lambda reintente automáticamente
+      throw error;
+    }
+  }
 }
-
-// Configuración de DLQ
-const dlqConfig = {
-  maxReceiveCount: 3,
-  retentionPeriod: 86400 * 7, // 7 días
-};
 ```
 
 **Comportamiento:**
-- Validar formato del mensaje antes de procesarlo
-- Para mensajes duplicados: verificar si el HTML ya existe y es idéntico (skip)
-- Implementar idempotencia: procesar el mismo mensaje múltiples veces debe ser seguro
-- DLQ retiene mensajes fallidos para análisis manual
-- Lambda separada puede procesar DLQ para reintentos manuales
+- Lambda reintenta automáticamente en caso de error (hasta 2 veces por defecto)
+- Para especificaciones duplicadas: verificar si el HTML ya existe y es idéntico (skip)
+- Implementar idempotencia: procesar el mismo evento múltiples veces debe ser seguro
+- Configurar Dead Letter Queue (DLQ) en Lambda para eventos fallidos después de reintentos
+- CloudWatch Alarms monitorean tasa de errores
+
+**Configuración de Reintentos en Lambda:**
+```hcl
+resource "aws_lambda_function_event_invoke_config" "processor" {
+  function_name = aws_lambda_function.processor.function_name
+  
+  maximum_retry_attempts = 2
+  maximum_event_age_in_seconds = 3600
+  
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.lambda_dlq.arn
+    }
+  }
+}
+
+resource "aws_sqs_queue" "lambda_dlq" {
+  name = "${var.project_name}-lambda-dlq"
+  message_retention_seconds = 1209600  # 14 días
+}
+```
 
 ### Errores de Generación con Redoc
 
@@ -1798,7 +2544,7 @@ tests/
 │   └── lambda-handler.test.ts
 ├── integration/
 │   ├── end-to-end-flow.test.ts
-│   ├── s3-sqs-lambda.test.ts
+│   ├── s3-lambda.test.ts
 │   └── catalog-update-concurrency.test.ts
 ├── property/
 │   ├── validation.property.test.ts
@@ -1882,7 +2628,7 @@ describe('Lambda Handler', () => {
       await expect(handler(event, {} as Context)).rejects.toThrow();
     }
     
-    // Verificar que el mensaje fue a DLQ (esto se maneja por SQS)
+    // Verificar que el evento fue a DLQ (esto se maneja por Lambda)
   });
 });
 
@@ -1913,16 +2659,16 @@ describe('Redoc Generator', () => {
 ### Pruebas de Integración
 
 ```typescript
-describe('S3 -> SQS -> Lambda Integration', () => {
+describe('S3 -> Lambda Integration', () => {
   it('should process spec from S3 event to portal generation', async () => {
-    // 1. Subir spec a S3
+    // 1. Subir spec a S3 (esto activa Lambda automáticamente)
     await s3Client.putObject({
       Bucket: SPECS_BUCKET,
       Key: 'user-service/v1.0.0/openapi.json',
       Body: JSON.stringify(validSpec)
     });
     
-    // 2. Esperar a que Lambda procese (polling SQS)
+    // 2. Esperar a que Lambda procese (trigger directo desde S3)
     await waitForProcessing(5000);
     
     // 3. Verificar que el HTML fue generado
@@ -2115,52 +2861,100 @@ test.describe('Generated Portal', () => {
 **Pipeline de CI:**
 
 ```yaml
-# .github/workflows/test.yml
-name: Tests
+# .gitlab-ci.yml
+stages:
+  - test
+  - build
+  - deploy
 
-on: [push, pull_request]
+variables:
+  NODE_VERSION: "18"
+  AWS_DEFAULT_REGION: us-east-1
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-      
-      - name: Install dependencies
-        run: npm ci
-      
-      - name: Run unit tests
-        run: npm run test:unit
-      
-      - name: Run property tests
-        run: npm run test:property
-      
-      - name: Run integration tests
-        run: npm run test:integration
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      
-      - name: Generate coverage report
-        run: npm run test:coverage
-      
-      - name: Upload coverage
-        uses: codecov/codecov-action@v3
-      
-      - name: Build Lambda function
-        run: npm run build
-      
-      - name: Deploy test portal
-        run: npm run deploy:test
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      
-      - name: Run E2E tests
-        run: npm run test:e2e
+.node_base:
+  image: node:${NODE_VERSION}
+  before_script:
+    - npm ci
+  cache:
+    paths:
+      - node_modules/
+
+test:unit:
+  extends: .node_base
+  stage: test
+  script:
+    - npm run test:unit
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+
+test:property:
+  extends: .node_base
+  stage: test
+  script:
+    - npm run test:property
+
+test:integration:
+  extends: .node_base
+  stage: test
+  script:
+    - npm run test:integration
+  variables:
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+
+test:coverage:
+  extends: .node_base
+  stage: test
+  script:
+    - npm run test:coverage
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+
+build:lambda:
+  extends: .node_base
+  stage: build
+  script:
+    - npm run build
+    - zip -r lambda.zip dist/ node_modules/
+  artifacts:
+    paths:
+      - lambda.zip
+    expire_in: 1 week
+  only:
+    - main
+    - tags
+
+deploy:test:
+  image: amazon/aws-cli:latest
+  stage: deploy
+  script:
+    - aws s3 sync test-portal/ s3://${TEST_PORTAL_BUCKET}/
+  variables:
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+  only:
+    - main
+  environment:
+    name: test
+
+test:e2e:
+  image: mcr.microsoft.com/playwright:v1.40.0-focal
+  stage: deploy
+  script:
+    - npm ci
+    - npx playwright install
+    - npm run test:e2e
+  dependencies:
+    - deploy:test
+  only:
+    - main
 ```
 
 ### Estrategia de Testing por Componente
@@ -2168,7 +2962,7 @@ jobs:
 | Componente | Pruebas Unitarias | Pruebas de Propiedades | Pruebas E2E |
 |------------|-------------------|------------------------|-------------|
 | Validator | ✓ Casos específicos de error | ✓ Specs válidas/inválidas aleatorias | - |
-| Lambda Handler | ✓ Procesamiento de eventos | ✓ Manejo de errores | - |
+| Lambda Handler | ✓ Procesamiento de eventos S3 | ✓ Manejo de errores | - |
 | Redoc Generator | ✓ Generación de HTML | ✓ Specs aleatorias | ✓ Renderizado en navegador |
 | Catalog Updater | ✓ Actualización de servicios | ✓ Concurrencia | - |
 | S3 Client | ✓ Upload/download | - | - |
@@ -2217,14 +3011,16 @@ describe('Load Tests', () => {
     expect(duration).toBeLessThan(5 * 60 * 1000);
   });
   
-  it('should handle SQS queue with 1000 messages', async () => {
-    // Simular 1000 mensajes en la cola
-    const messages = Array.from({ length: 1000 }, (_, i) => 
+  it('should handle 1000 concurrent S3 events', async () => {
+    // Simular 1000 eventos S3 (Lambda se invoca para cada uno)
+    const events = Array.from({ length: 1000 }, (_, i) => 
       createS3Event(`service-${i}/v1.0.0/openapi.json`)
     );
     
     // Lambda debe procesar todos sin errores
-    const results = await processMessages(messages);
+    const results = await Promise.all(
+      events.map(event => handler(event, {} as Context))
+    );
     
     const successCount = results.filter(r => r.success).length;
     expect(successCount).toBe(1000);
