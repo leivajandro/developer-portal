@@ -9,16 +9,7 @@
   "toolAliases": {},
   "allowedTools": [],
   "resources": [],
-  "hooks": {
-    "validate-gitlab-ci": {
-      "name": "Validate GitLab CI Configuration",
-      "description": "Validates .gitlab-ci.yml configuration when saved to catch syntax errors and best practice violations",
-      "eventType": "fileEdited",
-      "hookAction": "askAgent",
-      "outputPrompt": "Validate the GitLab CI/CD configuration for syntax correctness, best practices, security issues, and optimization opportunities. Check for proper stage definitions, job dependencies, caching strategies, and security concerns like exposed secrets.",
-      "filePatterns": "**/.gitlab-ci.yml,**/.gitlab-ci.yaml"
-    }
-  },
+  "hooks": {},
   "toolsSettings": {},
   "includeMcpJson": false,
   "model": null
