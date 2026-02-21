@@ -1,4 +1,4 @@
-# Plan de Implementación: OpenAPI Documentation Viewer
+# Plan de Implementación: Developer Portal API
 
 ## Resumen
 

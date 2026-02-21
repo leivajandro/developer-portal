@@ -1,8 +1,8 @@
-# Documento de Diseño: OpenAPI Documentation Viewer
+# Documento de Diseño: Developer Portal API
 
 ## Resumen General
 
-El OpenAPI Documentation Viewer es un sistema event-driven que genera automáticamente un Developer Portal centralizado mediante la agregación de especificaciones OpenAPI de múltiples microservicios. El sistema utiliza una arquitectura serverless basada en AWS Lambda, S3 y SQS para procesar y publicar documentación de forma incremental.
+El Developer Portal API es un sistema event-driven que genera automáticamente un Developer Portal centralizado mediante la agregación de especificaciones OpenAPI de múltiples microservicios. El sistema utiliza una arquitectura serverless basada en AWS Lambda, S3 y SQS para procesar y publicar documentación de forma incremental.
 
 ### Arquitectura Final
 
@@ -1696,7 +1696,7 @@ const propertyTestConfig = {
 Cada prueba de propiedad debe referenciar su propiedad del documento de diseño:
 
 ```typescript
-describe('Feature: openapi-documentation-viewer, Property 1: Validación de formato OpenAPI', () => {
+describe('Feature: developer-portal-api, Property 1: Validación de formato OpenAPI', () => {
   it('should correctly classify OpenAPI specs as valid or invalid', () => {
     fc.assert(
       fc.property(
